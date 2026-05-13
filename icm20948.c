@@ -513,6 +513,28 @@ static const struct iio_trigger_ops icm20948_trigger_ops = {
 };
 
 /*
+ * Paired with `indio_dev->trig = iio_trigger_get(...)` below. Runs from
+ * devm cleanup BEFORE devm_iio_trigger_register's release tears down the
+ * trigger, ensuring indio_dev->trig never points at an unregistered
+ * (and soon-to-be-freed) trigger object. Also drops the refcount we
+ * took with iio_trigger_get, so the trigger frees cleanly.
+ *
+ * Idempotent: iio_device_unregister (called from our remove path
+ * before devm fires) already nulls indio_dev->trig in the success case,
+ * in which case this is a no-op. In the probe-failure case where the
+ * remove path never runs, this is what actually does the cleanup.
+ */
+static void icm20948_unset_trig(void *p)
+{
+	struct iio_dev *indio_dev = p;
+
+	if (indio_dev->trig) {
+		iio_trigger_put(indio_dev->trig);
+		indio_dev->trig = NULL;
+	}
+}
+
+/*
  * Register a data-ready IRQ trigger if the i2c_client has an IRQ wired
  * via DT (interrupts = <...>). No-op otherwise — the driver still works,
  * just requires an external trigger (e.g. iio-trig-hrtimer) for buffered
@@ -562,6 +584,11 @@ static int icm20948_setup_data_rdy_trigger(struct iio_dev *indio_dev)
 
 	/* Auto-attach so userspace gets a working trigger out of the box. */
 	indio_dev->trig = iio_trigger_get(icm->trig);
+	ret = devm_add_action_or_reset(&client->dev,
+		icm20948_unset_trig, indio_dev);
+	if (ret < 0) {
+		return ret;
+	}
 
 	/* Honour DT-specified IRQ trigger type if any; fall back to rising. */
 	irq_flags = irqd_get_trigger_type(irq_get_irq_data(client->irq));
