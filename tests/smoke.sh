@@ -96,7 +96,10 @@ build() {
 }
 
 load_and_bind() {
-    log "insmod + bind 0x$I2C_ADDR on i2c-$I2C_BUS"
+    log "insmod + bind $I2C_ADDR on i2c-$I2C_BUS"
+    # insmod doesn't resolve deps; pre-load the IIO core via modprobe so
+    # icm20948 finds its exports (industrialio, *-buffer, *-triggered-buffer).
+    $SUDO modprobe industrialio-triggered-buffer 2>/dev/null || true
     $SUDO insmod "$REPO_DIR/icm20948.ko" || die "insmod failed (dmesg | tail)"
     MOD_LOADED=1
 
