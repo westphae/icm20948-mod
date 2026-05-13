@@ -1,6 +1,6 @@
 ICM20948-mod
 ============
-Linux kernel IIO driver for the [ICM20948](https://invensense.tdk.com/products/motion-tracking/9-axis/icm-20948/) 9-axis IMU (3-axis accel + 3-axis gyro + on-chip AK09916 magnetometer + temperature). Polled I2C only — no SPI, no FIFO, no data-ready IRQ trigger (use an external one such as `iio-trig-hrtimer`).
+Linux kernel IIO driver for the [ICM20948](https://invensense.tdk.com/products/motion-tracking/9-axis/icm-20948/) 9-axis IMU (3-axis accel + 3-axis gyro + on-chip AK09916 magnetometer + temperature). I²C only — no SPI, no FIFO. Optional on-chip data-ready IRQ trigger when the INT1 pin is wired and declared in DT; otherwise use an external trigger such as `iio-trig-hrtimer`. Magnetometer overflow (HOFL) is surfaced as a sticky `in_magn_overrange` sysfs flag.
 
 Tested target: Raspberry Pi running a recent (6.x) kernel, ICM-20948 on `i2c-1` at address `0x68`.
 
@@ -59,13 +59,36 @@ sudo reboot
 
 That target:
 
-1. `modules_install` — copies `icm20948.ko` into `/lib/modules/$(uname -r)/extra/` and runs `depmod -a`.
+1. `modules_install` — copies `icm20948.ko` into a subdirectory of `/lib/modules/$(uname -r)/` (`updates/` or `extra/` depending on your kbuild version) and runs `depmod -a`.
 2. `dtbo_install` — builds `dts/icm20948-overlay.dts` and copies the resulting `icm20948.dtbo` into `/boot/firmware/overlays/` (falls back to `/boot/overlays/` on legacy layouts; override with `DTBO_DIR=...`).
 3. `config_enable` — appends `dtoverlay=icm20948` to `/boot/firmware/config.txt` (or `/boot/config.txt`; override with `CONFIG_TXT=...`) if not already present.
 
 After reboot the kernel matches the overlay's `compatible = "invensense,icm20948"` against the driver and probes automatically; sensor data appears under `/sys/bus/iio/devices/iio:deviceN/`.
 
 If your sensor is on a different I2C bus or address, edit `dts/icm20948-overlay.dts` (change `target = <&i2c1>`) or pass an address override on the overlay line, e.g. `dtoverlay=icm20948,addr=0x69` (AD0 tied high).
+
+### rpi-update kernels: also install the in-tree modules
+
+`make install` installs *only* our `icm20948.ko`, not the in-tree kernel modules it depends on (`i2c-bcm2835`, `industrialio`, `industrialio-triggered-buffer`, `iio-trig-hrtimer`, …). On a distro-packaged kernel those modules are shipped by the kernel package and already live under `/lib/modules/$(uname -r)/kernel/`. On an `rpi-update` kernel they are **not** — the firmware deploys only the bootable kernel image, not the bundled module set — so after reboot you see symptoms like:
+
+- `i2cdetect -y 1` → `Error: Could not open file '/dev/i2c-1' ...`
+- `dmesg | grep i2c` shows nothing about `bcm2835-i2c`
+- `find /lib/modules/$(uname -r) -name 'i2c*bcm*'` returns empty
+- our overlay applied (the DT shows `icm20948@68` under `i2c@7e804000`), but no driver bound it
+
+Fix is one-time per rpi-update kernel — install the in-tree modules out of the `KSRC` tree you already built earlier for the OOT compile:
+
+```sh
+# modules_install refuses to proceed without these manifest files; empty
+# placeholders satisfy the dependency without affecting runtime behaviour
+# (built-in modules live inside the kernel image, no install needed).
+touch /root/linux/modules.builtin /root/linux/modules.builtin.modinfo
+
+sudo make -C /root/linux modules_install
+sudo depmod -a      # modules_install skips depmod when System.map is absent
+```
+
+Then either reboot or `sudo modprobe i2c-bcm2835` to bring the bus up. `/dev/i2c-1` should appear immediately, the overlay's `compatible` matches our driver, and `/sys/bus/iio/devices/iio:device0/name` reads `icm20948`.
 
 ### Optional: data-ready interrupt
 
@@ -95,9 +118,9 @@ sudo rmmod icm20948
 Uninstall
 ---------
 ```sh
-sudo rm /boot/firmware/overlays/icm20948.dtbo                # or /boot/overlays/
-sudo sed -i '/^dtoverlay=icm20948/d' /boot/firmware/config.txt
-sudo rm /lib/modules/$(uname -r)/extra/icm20948.ko
+sudo rm /boot/firmware/overlays/icm20948.dtbo                          # or /boot/overlays/
+sudo sed -i '/^dtoverlay=icm20948/d' /boot/firmware/config.txt         # or /boot/config.txt
+sudo find /lib/modules/$(uname -r) -name 'icm20948.ko*' -delete
 sudo depmod -a
 sudo reboot
 ```
