@@ -115,6 +115,37 @@ echo 0x68 | sudo tee /sys/bus/i2c/devices/i2c-1/delete_device
 sudo rmmod icm20948
 ```
 
+Troubleshooting
+---------------
+
+**`i2cdetect -y 1` errors with `Could not open file '/dev/i2c-1'`**
+
+The bus device isn't there because `i2c-bcm2835` didn't load. On a distro kernel run `sudo modprobe i2c-bcm2835`; on an rpi-update kernel you also need to install the in-tree modules from your `KSRC` tree — see [rpi-update kernels: also install the in-tree modules](#rpi-update-kernels-also-install-the-in-tree-modules).
+
+**`i2cdetect -y 1` shows `UU` at 0x68 — that's success, not an error**
+
+`UU` means the kernel driver owns the address (so userspace can't probe it). It's the desired end state. Verify by reading `/sys/bus/iio/devices/iio:device0/name` (should print `icm20948`).
+
+**`i2cdetect` shows `UU` at 0x68 but every `*_raw` reads zero**
+
+The chip silently wedged after probe — driver still thinks it owns the bus, but the chip is no longer servicing register reads. Force a fresh probe to recover:
+
+```sh
+echo 1-0068 | sudo tee /sys/bus/i2c/drivers/icm20948/unbind >/dev/null
+echo 1-0068 | sudo tee /sys/bus/i2c/drivers/icm20948/bind   >/dev/null
+cat /sys/bus/iio/devices/iio:device0/in_accel_z_raw            # should now be non-zero
+```
+
+(`1-0068` = bus 1, address 0x68; adjust as needed.) If the rebind itself errors out or values stay zero afterward, the chip is hard-wedged and only a hardware power-cycle will recover it.
+
+**`i2cdetect -y 1` shows `--` at every address where you expect a device**
+
+The chip didn't ACK at all. Power-cycle the sensor (unplug+replug 3.3 V if you can; reboot the Pi otherwise). This usually happens after some unlucky aux-bus interaction during mag init that hangs the chip's I²C state machine; the live driver may sometimes provoke it during heavy iteration.
+
+**`dmesg | grep icm20948` shows `Unknown symbol …` at boot**
+
+Our module loaded before its IIO-core dependencies. Happens on rpi-update kernels where the in-tree modules weren't installed in dependency order. Install them (`make modules_install` from `KSRC`, then `depmod -a`); the kernel will then auto-load `industrialio` ahead of `icm20948` on subsequent boots.
+
 Uninstall
 ---------
 ```sh
