@@ -51,6 +51,7 @@ typedef struct {
 	struct iio_mount_matrix orientation;
 	struct mutex lock;
 	uint8_t bank_reg;
+	uint8_t mag_overrange;	/* sticky AK09916 HOFL; cleared by writing 0 to in_magn_overrange */
 } ICM20948_DATA_T;
 
 typedef struct {
@@ -77,6 +78,19 @@ typedef struct {
 	uint8_t pad[sizeof(ICM20948_SENS_DATA_T) % sizeof(int64_t)];
 	int64_t timestamp;
 } __attribute__((__packed__)) ICM20948_BUFFER_DATA_T;
+
+/*
+ * What the slave-0 burst writes into BANK_0 EXT_SLV_SENS_DATA_*. The first
+ * 20 bytes match ICM20948_SENS_DATA_T and feed straight into the IIO scan
+ * buffer. The trailing 2 bytes capture the AK09916's ST2 (overflow flag in
+ * bit 3) and the unused TMPS dummy byte — read but not pushed into the
+ * IIO buffer.
+ */
+typedef struct {
+	ICM20948_SENS_DATA_T sens;
+	uint8_t mag_st2;
+	uint8_t mag_tmps;
+} __attribute__((__packed__)) ICM20948_BURST_DATA_T;
 
 typedef struct {
 	int vals[2];
@@ -214,7 +228,7 @@ static int icm20948_select_bank(ICM20948_DATA_T *icm, uint8_t bank) {
 	return 0;
 }
 
-static int icm20948_read(ICM20948_DATA_T *icm, ICM20948_SENS_DATA_T *data) {
+static int icm20948_read(ICM20948_DATA_T *icm, ICM20948_BURST_DATA_T *data) {
 	int ret;
 
 	ret = icm20948_select_bank(icm, ACCEL_XOUT_H >> 8);
@@ -222,7 +236,7 @@ static int icm20948_read(ICM20948_DATA_T *icm, ICM20948_SENS_DATA_T *data) {
 		return ret;
 	}
 
-	return i2c_smbus_read_i2c_block_data(icm->client, ACCEL_XOUT_H & 0xff, sizeof(ICM20948_SENS_DATA_T), (unsigned char *) data);
+	return i2c_smbus_read_i2c_block_data(icm->client, ACCEL_XOUT_H & 0xff, sizeof(ICM20948_BURST_DATA_T), (unsigned char *) data);
 }
 
 static int icm20948_read_byte(ICM20948_DATA_T *icm, uint16_t reg) {
@@ -383,6 +397,39 @@ static ssize_t icm20948_show_available(struct device *dev,
 	return len;
 }
 
+/*
+ * AK09916 ST2.HOFL is set whenever a measurement saturated the chip's
+ * ±4912 µT range. The buffered trigger handler latches it into
+ * icm->mag_overrange. The attribute is sticky; userspace clears it by
+ * writing "0" (the only accepted write value). Single-shot sysfs reads
+ * of in_magn_*_raw do NOT update this flag — only the buffered path.
+ */
+static ssize_t icm20948_show_mag_overrange(struct device *dev,
+			struct device_attribute *attr, char *buf)
+{
+	struct iio_dev *indio_dev = dev_to_iio_dev(dev);
+	ICM20948_DATA_T *icm = (ICM20948_DATA_T *) iio_priv(indio_dev);
+	return sprintf(buf, "%u\n", READ_ONCE(icm->mag_overrange));
+}
+
+static ssize_t icm20948_store_mag_overrange(struct device *dev,
+			struct device_attribute *attr,
+			const char *buf, size_t count)
+{
+	struct iio_dev *indio_dev = dev_to_iio_dev(dev);
+	ICM20948_DATA_T *icm = (ICM20948_DATA_T *) iio_priv(indio_dev);
+	unsigned int val;
+	int ret = kstrtouint(buf, 0, &val);
+	if (ret) {
+		return ret;
+	}
+	if (val != 0) {
+		return -EINVAL;
+	}
+	WRITE_ONCE(icm->mag_overrange, 0);
+	return count;
+}
+
 static int icm20948_read_lookup(ICM20948_DATA_T *icm,
 	const ICM20948_LOOKUP_HEAD_T *lookup,
 	int *val, int *val2)
@@ -444,19 +491,29 @@ static irqreturn_t icm20948_trigger_handler(int irq, void *p)
 	struct iio_dev *indio_dev = pf->indio_dev;
 	ICM20948_DATA_T *icm = (ICM20948_DATA_T *) iio_priv(indio_dev);
 	int ret;
+	ICM20948_BURST_DATA_T burst;
 	ICM20948_BUFFER_DATA_T buffer;
 
-	// read from sensor
+	// read from sensor (22 bytes: 20 of sensor data + mag ST2 + mag dummy)
 	mutex_lock(&icm->lock);
-	ret = icm20948_read(icm, &buffer.sens);
+	ret = icm20948_read(icm, &burst);
 	mutex_unlock(&icm->lock);
 	if (ret < 0) {
 		goto fail0;
 	}
 
+	buffer.sens = burst.sens;
+
 	// mag y and z axis is flipped around the x axis
 	buffer.sens.mag.y = -buffer.sens.mag.y;
 	buffer.sens.mag.z = -buffer.sens.mag.z;
+
+	// Latch the AK09916 overflow bit so userspace can detect a sample
+	// where any axis saturated the ±4912 µT measurement range. Sticky
+	// until cleared via `echo 0 > in_magn_overrange`.
+	if (burst.mag_st2 & RV_MAG_HOFL) {
+		WRITE_ONCE(icm->mag_overrange, 1);
+	}
 
 	buffer.timestamp = iio_get_time_ns(indio_dev);
 	iio_push_to_buffers(indio_dev, &buffer);
@@ -670,12 +727,17 @@ static IIO_DEVICE_ATTR(in_accel_scale_available,
 static IIO_DEVICE_ATTR(in_anglvel_scale_available,
 	S_IRUGO, icm20948_show_available, NULL, ICM20948_LOOKUP_ANGLVAL_SCALE);
 
+static IIO_DEVICE_ATTR(in_magn_overrange,
+	S_IRUGO | S_IWUSR,
+	icm20948_show_mag_overrange, icm20948_store_mag_overrange, 0);
+
 static struct attribute *icm20948_attrs[] = {
 	&iio_dev_attr_in_accel_filter_low_pass_3db_frequency_available.dev_attr.attr,
 	&iio_dev_attr_in_anglvel_filter_low_pass_3db_frequency_available.dev_attr.attr,
 	&iio_dev_attr_in_temp_filter_low_pass_3db_frequency_available.dev_attr.attr,
 	&iio_dev_attr_in_accel_scale_available.dev_attr.attr,
 	&iio_dev_attr_in_anglvel_scale_available.dev_attr.attr,
+	&iio_dev_attr_in_magn_overrange.dev_attr.attr,
 	NULL
 };
 
@@ -771,7 +833,7 @@ static int icm20948_i2c_probe(struct i2c_client *client)
 {
 	struct iio_dev *indio_dev;
 	ICM20948_DATA_T *icm;
-	ICM20948_SENS_DATA_T data;
+	ICM20948_BURST_DATA_T data;
 	int ret, count;
 
 	indio_dev = devm_iio_device_alloc(&client->dev, sizeof(ICM20948_DATA_T));
