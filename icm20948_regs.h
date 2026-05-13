@@ -198,6 +198,12 @@
 #define RV_I2C_SLV0_BYTE_SW	(1 << 6)
 #define RV_I2C_SLV0_EN		(1 << 7)
 
+#define RV_I2C_SLV1_EN		(1 << 7)
+
+#define RV_I2C_SLV0_DLY_EN	(1 << 0)
+#define RV_I2C_SLV1_DLY_EN	(1 << 1)
+#define RV_I2C_DELAY_ES_SHADOW	(1 << 7)
+
 #define RV_I2C_SLV4_DLY_0	(1 << 0)
 #define RV_I2C_SLV4_DLY_1	(1 << 1)
 #define RV_I2C_SLV4_DLY_2	(1 << 2)

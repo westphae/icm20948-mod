@@ -882,13 +882,27 @@ static int icm20948_i2c_probe(struct i2c_client *client)
 		return -ETIMEDOUT;
 	}
 
-	// enable MAG 100Hz mode
-	ret = icm20948_slave_write_byte(icm, MAG_I2C_ADDR, MAG_CNTL2, RV_MAG_MODE_100HZ);
+	// Configure the aux-master rate BEFORE enabling any slaves. Each
+	// single-shot measurement takes ~7.5 ms on the AK09916, so the aux
+	// rate must be slow enough that the AK09916 finishes a measurement
+	// before the next trigger arrives. Otherwise the AK09916 wedges on
+	// the aux bus and slave-4 reads from it start returning NACK.
+	// Aux rate = gyro_rate / (SLV4_CTRL[4:0]+1); with the default ~1.1 kHz
+	// gyro rate and a delay value of 10 this lands around 100 Hz (~10 ms).
+	ret = icm20948_write_byte(icm, I2C_SLV4_CTRL, 10);
+	if (ret < 0) {
+		return ret;
+	}
+	ret = icm20948_write_byte(icm, I2C_MST_DELAY_CTRL,
+		RV_I2C_SLV0_DLY_EN | RV_I2C_SLV1_DLY_EN);
 	if (ret < 0) {
 		return ret;
 	}
 
-	// enable MAG result register transfer (swap bytes to fit IMC's byte order)
+	// Slave-0: continuously copy mag HXL..ST2 (8 bytes) into BANK_0
+	// EXT_SLV_SENS_DATA_00..07. BYTE_SW reorders each big-endian word to
+	// match the IMC's byte order. Reading the trailing ST2 byte releases
+	// the AK09916's measurement lock so the next single-shot can fire.
 	ret = icm20948_write_byte(icm, I2C_SLV0_ADDR, MAG_I2C_ADDR | I2C_SLV_ADDR_READ);
 	if (ret < 0) {
 		return ret;
@@ -904,7 +918,34 @@ static int icm20948_i2c_probe(struct i2c_client *client)
 		return ret;
 	}
 
-	// try to read data
+	// Slave-1: write CNTL2=SINGLE to the mag every aux-master cycle. The
+	// AK09916 does not accept continuous-mode writes via the slave-4 path
+	// (CNTL2=0x08 silently fails to latch); upstream Linux's ak8975 driver
+	// uses single-measurement mode for the same reason. Slave-1 re-triggers
+	// a one-shot measurement each cycle; slave-0 reads out the result on
+	// the next cycle.
+	ret = icm20948_write_byte(icm, I2C_SLV1_ADDR, MAG_I2C_ADDR);
+	if (ret < 0) {
+		return ret;
+	}
+	ret = icm20948_write_byte(icm, I2C_SLV1_REG, MAG_CNTL2);
+	if (ret < 0) {
+		return ret;
+	}
+	ret = icm20948_write_byte(icm, I2C_SLV1_DO, RV_MAG_MODE_SINGLE);
+	if (ret < 0) {
+		return ret;
+	}
+	ret = icm20948_write_byte(icm, I2C_SLV1_CTRL, RV_I2C_SLV1_EN | 1);
+	if (ret < 0) {
+		return ret;
+	}
+
+	// Give slave-1 one full aux cycle to fire and the AK09916 time to
+	// complete its first measurement before we read out below.
+	msleep(50);
+
+	// try to read data (verifies the end-to-end aux path is working)
 	ret = icm20948_read(icm, &data);
 	if (ret < 0) {
 		return ret;
@@ -936,8 +977,10 @@ static void icm20948_i2c_remove(struct i2c_client *client)
 	iio_device_unregister(indio_dev);
 	iio_triggered_buffer_cleanup(indio_dev);
 
-	// stop MAG result register transfer
+	// Disable slave-0 (read) and slave-1 (mag re-trigger) before the master.
 	icm20948_write_byte(icm, I2C_SLV0_CTRL, 0);
+	icm20948_write_byte(icm, I2C_SLV1_CTRL, 0);
+	icm20948_write_byte(icm, I2C_MST_DELAY_CTRL, 0);
 	msleep(SLAVE_XFER_TIME * sizeof(ICM20948_MAG_DATA_T));
 
 	// disable I2C Master
