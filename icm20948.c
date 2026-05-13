@@ -633,13 +633,12 @@ static int icm20948_write_raw(struct iio_dev *indio_dev,
 	int ret;
 
 	// allow writes on idle state only
-	ret = iio_device_claim_direct_mode(indio_dev);
-	if (ret) {
-		return ret;
+	if (!iio_device_claim_direct(indio_dev)) {
+		return -EBUSY;
 	}
 
 	ret = icm20948_write_raw_int(indio_dev, chan, val, val2, mask);
-	iio_device_release_direct_mode(indio_dev);
+	iio_device_release_direct(indio_dev);
 	return ret;
 }
 
@@ -768,8 +767,7 @@ static const struct iio_chan_spec icm20948_channels[] = {
 	IIO_CHAN_SOFT_TIMESTAMP(ICM20948_SCAN_TIMESTAMP)
 };
 
-static int icm20948_i2c_probe(struct i2c_client *client,
-			    const struct i2c_device_id *id)
+static int icm20948_i2c_probe(struct i2c_client *client)
 {
 	struct iio_dev *indio_dev;
 	ICM20948_DATA_T *icm;
@@ -787,16 +785,15 @@ static int icm20948_i2c_probe(struct i2c_client *client,
 	mutex_init(&icm->lock);
 
 	indio_dev->dev.parent = &client->dev;
-	indio_dev->name = id->name;
+	indio_dev->name = "icm20948";
 	indio_dev->info = &icm20948_info;
 	indio_dev->modes = INDIO_DIRECT_MODE;
 	indio_dev->channels = icm20948_channels;
 	indio_dev->num_channels = ARRAY_SIZE(icm20948_channels);
 	indio_dev->available_scan_masks = icm20948_scan_masks;
 
-	// get mount matrix
-	ret = of_iio_read_mount_matrix(&client->dev,
-		"mount-matrix", &icm->orientation);
+	// get mount matrix (reads the "mount-matrix" DT/firmware property)
+	ret = iio_read_mount_matrix(&client->dev, &icm->orientation);
 	if (ret) {
 		return ret;
 	}
@@ -919,36 +916,24 @@ static int icm20948_i2c_probe(struct i2c_client *client,
 	return 0;
 }
 
-static int icm20948_i2c_remove(struct i2c_client *client)
+static void icm20948_i2c_remove(struct i2c_client *client)
 {
 	struct iio_dev *indio_dev = i2c_get_clientdata(client);
 	ICM20948_DATA_T *icm = iio_priv(indio_dev);
-	int ret;
 
 	iio_device_unregister(indio_dev);
 	iio_triggered_buffer_cleanup(indio_dev);
 
 	// stop MAG result register transfer
-	ret = icm20948_write_byte(icm, I2C_SLV0_CTRL, 0);
-	if (ret < 0) {
-		return ret;
-	}
+	icm20948_write_byte(icm, I2C_SLV0_CTRL, 0);
 	msleep(SLAVE_XFER_TIME * sizeof(ICM20948_MAG_DATA_T));
 
-	// disble I2C Master
-	ret = icm20948_write_byte(icm, USER_CTRL, 0);
-	if (ret < 0) {
-		return ret;
-	}
+	// disable I2C Master
+	icm20948_write_byte(icm, USER_CTRL, 0);
 	msleep(SLAVE_XFER_TIME);
 
 	// set device to sleep
-	ret = icm20948_write_byte(icm, PWR_MGMT_1, RV_SLEEP | RV_CLKSEL_0);
-	if (ret < 0) {
-		return ret;
-	}
-
-	return 0;
+	icm20948_write_byte(icm, PWR_MGMT_1, RV_SLEEP | RV_CLKSEL_0);
 }
 
 static const struct of_device_id icm20948_of_i2c_match[] = {
