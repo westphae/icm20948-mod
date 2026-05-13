@@ -176,6 +176,10 @@
 
 #define RV_TEMP_DLPFCFG(x)	((x & 0x07) << 0)
 
+#define RV_I2C_MST_CLK(x)	((x) & 0x0f)
+#define RV_I2C_MST_P_NSR	(1 << 4)
+#define RV_I2C_MST_MULT_EN	(1 << 7)
+
 #define RV_I2C_SLV0_NACK	(1 << 0)
 #define RV_I2C_SLV1_NACK	(1 << 1)
 #define RV_I2C_SLV2_NACK	(1 << 2)

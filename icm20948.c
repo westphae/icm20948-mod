@@ -837,7 +837,19 @@ static int icm20948_i2c_probe(struct i2c_client *client)
 	if (ret < 0) {
 		return ret;
 	}
-	
+
+	// Configure I2C master clock and stop/restart behaviour. The reset
+	// default of 0x00 leaves the master at ~370 kHz with restart-between-
+	// transactions, which both InvenSense's reference code and the upstream
+	// kernel inv_mpu6050 driver explicitly override. Setting P_NSR=1 (STOP
+	// between transactions) + MST_CLK=7 (~345.6 kHz) matches that practice.
+	ret = icm20948_write_byte(icm, I2C_MST_CTRL,
+		RV_I2C_MST_P_NSR | RV_I2C_MST_CLK(7));
+	if (ret < 0) {
+		return ret;
+	}
+
+
 	// check MAG_WIA2
 	// try multiple times to recover MAG's I2C state from
 	// potentialy aborted previous transfer 
