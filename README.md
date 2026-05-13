@@ -6,15 +6,47 @@ Tested target: Raspberry Pi running a recent (6.x) kernel, ICM-20948 on `i2c-1` 
 
 Build
 -----
-Requires kernel headers for the running kernel.
+Requires a prepared kernel build tree at `/lib/modules/$(uname -r)/build`. Without it, `make` fails with `No such file or directory`. The Makefile defaults to that path; override `KDIR=...` if your tree is elsewhere.
 
 ```sh
-make
+make            # produces icm20948.ko
 ```
 
-produces `icm20948.ko`. The Makefile defaults to `KDIR=/lib/modules/$(uname -r)/build`; override `KDIR=...` if your build tree is elsewhere.
+### Setting up the build tree
 
-On a Raspberry Pi running an `rpi-update` kernel (no packaged headers), point `/lib/modules/$(uname -r)/build` at a matching kernel source tree and run `make modules_prepare && make modules` inside it once to generate `Module.symvers`; otherwise modpost will fail with "undefined" symbol errors for every external reference.
+**Distro-packaged kernel** (Raspberry Pi OS, Debian/Ubuntu, etc.):
+
+```sh
+sudo apt install raspberrypi-kernel-headers    # Raspberry Pi
+# or
+sudo apt install linux-headers-$(uname -r)     # generic Debian/Ubuntu
+```
+
+The package places headers under `/usr/src/linux-headers-$(uname -r)` and registers the `/lib/modules/$(uname -r)/build` symlink for you. `make` then Just Works.
+
+**Custom or rpi-update kernel** (no headers package available — `dom@buildbot` in `/proc/version` is the giveaway): point at a kernel source tree of the *exact* same version, prepare it, and link it. On Raspberry Pi the typical flow is:
+
+```sh
+# Fetch matching source (rpi-source is one of several options)
+sudo apt install bc bison flex libssl-dev libncurses-dev
+git clone --depth=1 --branch <matching-tag> https://github.com/raspberrypi/linux /root/linux
+
+# Prepare it. The full `make modules` is what produces Module.symvers,
+# which the OOT build needs for modpost. ~60–90 min on a Pi 4 first time.
+cd /root/linux
+cp /proc/config.gz /tmp/config.gz && gunzip -c /tmp/config.gz > .config   # or use the distro's /boot/config-*
+make modules_prepare
+make -j$(nproc) modules
+
+# Wire it up
+sudo make -C /path/to/icm20948-mod setup-kbuild KSRC=/root/linux
+```
+
+`setup-kbuild` verifies that `KSRC` is a real kernel source tree, that its `UTS_RELEASE` matches `$(uname -r)`, and that `Module.symvers` exists in it — then creates the `/lib/modules/$(uname -r)/build` symlink. Re-run it after anything (apt updates, depmod sweeps) wipes the symlink:
+
+```sh
+sudo make setup-kbuild KSRC=/root/linux
+```
 
 Install (persistent)
 --------------------

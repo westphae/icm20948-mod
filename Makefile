@@ -37,4 +37,40 @@ config_enable:
 
 install: modules_install dtbo_install config_enable
 
-.PHONY: all dtbo clean modules_install dtbo_install config_enable install
+# Create the /lib/modules/$(uname -r)/build symlink that kbuild needs for
+# out-of-tree module builds. Use this when the running kernel has no
+# distro-packaged headers (e.g. rpi-update kernels) and you have a matching
+# kernel source tree elsewhere. KSRC must point at a tree that:
+#   - matches the running kernel exactly (UTS_RELEASE == $(uname -r))
+#   - has had `make modules_prepare` run in it
+#   - has Module.symvers (i.e. a prior `make modules` completed there)
+# Needs root because /lib/modules/... is not user-writable.
+setup-kbuild:
+	@set -e; \
+	LINK=/lib/modules/`uname -r`/build; \
+	if [ -e "$$LINK" ]; then \
+		echo "$$LINK already exists; nothing to do."; \
+		exit 0; \
+	fi; \
+	if [ -z "$(KSRC)" ]; then \
+		echo "Usage: sudo make setup-kbuild KSRC=/path/to/matching/kernel/source"; \
+		echo ""; \
+		echo "Prepare the source tree first if you haven't:"; \
+		echo "  cd \$$KSRC && make modules_prepare && make -j\$$(nproc) modules"; \
+		exit 1; \
+	fi; \
+	test -d "$(KSRC)" || { echo "KSRC=$(KSRC): not a directory"; exit 1; }; \
+	test -f "$(KSRC)/Module.symvers" || { \
+		echo "$(KSRC)/Module.symvers missing; run there:"; \
+		echo "  make modules_prepare && make -j\$$(nproc) modules"; \
+		exit 1; }; \
+	KREL=`sed -n 's/.*UTS_RELEASE "\(.*\)".*/\1/p' "$(KSRC)/include/generated/utsrelease.h" 2>/dev/null`; \
+	RUN=`uname -r`; \
+	if [ "$$KREL" != "$$RUN" ]; then \
+		echo "version mismatch: KSRC builds [$$KREL], running [$$RUN]"; \
+		exit 1; \
+	fi; \
+	ln -sT "$(KSRC)" "$$LINK"; \
+	echo "linked $$LINK -> $(KSRC)"
+
+.PHONY: all dtbo clean modules_install dtbo_install config_enable install setup-kbuild
