@@ -57,6 +57,7 @@ typedef struct {
 	struct mutex lock;
 	uint8_t bank_reg;
 	uint8_t mag_overrange;	/* sticky AK09916 HOFL; cleared by writing 0 to in_magn_overrange */
+	int16_t last_mag_x, last_mag_y, last_mag_z;	/* last non-zero mag sample, big-endian as read from the chip; used to mask aux-master glitches in the buffered path */
 } ICM20948_DATA_T;
 
 typedef struct {
@@ -625,6 +626,24 @@ static irqreturn_t icm20948_trigger_handler(int irq, void *p)
 	mutex_unlock(&icm->lock);
 	if (ret < 0) {
 		goto fail0;
+	}
+
+	// Aux-master glitch filter. ~1% of buffered samples come back with
+	// EXT_SLV_SENS_DATA_00..07 all zero — the chip's I2C master NACKed
+	// the AK09916 on that cycle (I2C_MST_STATUS shows SLV0/1/2_NACK
+	// flags) and zeroed the slave registers. Mag readings of exactly
+	// (0,0,0) are physically impossible in any non-degenerate field, so
+	// substitute the previous good sample to keep the buffered stream
+	// continuous.
+	if (burst.sens.mag.x == 0 && burst.sens.mag.y == 0 &&
+	    burst.sens.mag.z == 0) {
+		burst.sens.mag.x = icm->last_mag_x;
+		burst.sens.mag.y = icm->last_mag_y;
+		burst.sens.mag.z = icm->last_mag_z;
+	} else {
+		icm->last_mag_x = burst.sens.mag.x;
+		icm->last_mag_y = burst.sens.mag.y;
+		icm->last_mag_z = burst.sens.mag.z;
 	}
 
 	buffer.sens = burst.sens;
