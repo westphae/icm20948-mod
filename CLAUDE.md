@@ -13,15 +13,19 @@ make                # builds icm20948.ko against /lib/modules/$(uname -r)/build
 make clean
 ```
 
-Kernel headers for the running kernel must be installed; the Makefile uses `M=$(PWD) modules` against that build tree. There is no in-tree test suite — exercising the driver means cross-/native-building, copying `icm20948.ko` to the target (typically a Raspberry Pi or similar SBC with I2C bus + ICM-20948), then:
+Kernel headers for the running kernel must be installed; the Makefile uses `M=$(PWD) modules` against that build tree. On rpi-update kernels with no packaged headers, point `/lib/modules/$(uname -r)/build` at a matching kernel source tree (and run `make modules_prepare`+`make modules` once there to generate `Module.symvers`, otherwise modpost will fail with undefined-symbol errors).
+
+Manual load + bind cycle on a target with the device wired to I²C-1 at 0x68:
 
 ```sh
 sudo insmod icm20948.ko
-# bind via device tree (compatible = "invensense,icm20948") or:
+# bind via device tree (compatible = "invensense,icm20948") or manually:
 echo icm20948 0x68 | sudo tee /sys/bus/i2c/devices/i2c-1/new_device
 # data appears under /sys/bus/iio/devices/iio:deviceN/
 sudo rmmod icm20948
 ```
+
+For a one-shot regression check against a real ICM-20948 (must be held stationary during the run), `tests/smoke.sh` builds, loads, binds, range-checks every `*_raw` channel, exercises the buffered path via `iio-trig-hrtimer`, verifies monotonic timestamps, and unwinds on every exit path. `I2C_BUS`, `I2C_ADDR`, `TRIG_HZ`, `CAPTURE_SAMPLES` are env-overridable.
 
 Channels exposed (sysfs): `in_accel_{x,y,z}_raw`, `in_anglvel_{x,y,z}_raw`, `in_magn_{x,y,z}_raw`, `in_temp_raw`, plus `_scale`, `_calibbias` (accel/gyro only), and `_filter_low_pass_3db_frequency` attributes. Buffered capture works through `iio_triggered_buffer` and needs an external trigger (e.g. `hrtimer` via `iio-trig-hrtimer`) — the driver does not register its own trigger.
 
