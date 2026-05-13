@@ -6,7 +6,7 @@ CONFIG_TXT ?= $(firstword $(wildcard /boot/firmware/config.txt /boot/config.txt)
 DTC       ?= dtc
 
 all:
-	$(MAKE) -C $(KDIR) M=$(PWD) modules
+	$(MAKE) -C $(KDIR) M=$(CURDIR) modules
 
 dtbo: dts/icm20948.dtbo
 
@@ -14,11 +14,11 @@ dts/icm20948.dtbo: dts/icm20948-overlay.dts
 	$(DTC) -@ -I dts -O dtb -o $@ $<
 
 clean:
-	$(MAKE) -C $(KDIR) M=$(PWD) clean
+	$(MAKE) -C $(KDIR) M=$(CURDIR) clean
 	rm -f dts/*.dtbo
 
 modules_install:
-	$(MAKE) -C $(KDIR) M=$(PWD) modules_install
+	$(MAKE) -C $(KDIR) M=$(CURDIR) modules_install
 	depmod -a
 
 dtbo_install: dts/icm20948.dtbo
