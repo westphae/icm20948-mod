@@ -530,8 +530,8 @@ static int icm20948_read_raw(struct iio_dev *indio_dev,
 			if (chan->channel2 >= IIO_MOD_X && chan->channel2 <= IIO_MOD_Z) {
 				i = icm20948_read_raw_word(icm, EXT_SLV_SENS_DATA_00, chan->channel2, val);
 				// mag y and z axis is flipped around the x axis
-				if (chan->channel2 == IIO_MOD_Y || chan->channel2 == IIO_MOD_Z) {
-					return -i;
+				if (i >= 0 && (chan->channel2 == IIO_MOD_Y || chan->channel2 == IIO_MOD_Z)) {
+					*val = -*val;
 				}
 				return i;
 			}
