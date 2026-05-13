@@ -152,12 +152,17 @@ check_sysfs() {
     done
     ok "gyro axes within ±1000 LSB ($gx, $gy, $gz)"
 
-    # Mag: 0.15 µT/LSB, Earth field ~20–65 µT → ~130–430 LSB. Bound generously.
+    # Mag: 0.15 µT/LSB, Earth field ~20–65 µT → ~130–430 LSB textbook.
+    # In practice nearby gear (WiFi modules, motors, ferrous mounts) easily
+    # pushes magnitude up to ~600 LSB. Lower bound at 100 catches the
+    # pre-fix `mag = 0,0,0` regression with margin; upper bound at 2000
+    # tolerates a noisy environment while still flagging gross calibration
+    # or scale-decode regressions.
     local mmag
     mmag=$(awk -v x="$mx" -v y="$my" -v z="$mz" 'BEGIN { print int(sqrt(x*x+y*y+z*z)) }')
-    [ "$mmag" -ge 50 ] && [ "$mmag" -le 1500 ] \
-        || die "mag magnitude $mmag LSB outside [50,1500]; expected Earth-field range"
-    ok "mag magnitude ≈ ${mmag} LSB (expect ~130–430 for Earth field)"
+    [ "$mmag" -ge 100 ] && [ "$mmag" -le 2000 ] \
+        || die "mag magnitude $mmag LSB outside [100,2000]; check mag init (was the AK09916 left in power-down?)"
+    ok "mag magnitude ≈ ${mmag} LSB (expect ~130–430 LSB textbook, often higher with nearby gear)"
 
     # Temp: T_C = raw / 333.87 + 21. Expect 10..60 °C.
     local tc
