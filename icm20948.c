@@ -629,9 +629,14 @@ static irqreturn_t icm20948_trigger_handler(int irq, void *p)
 
 	buffer.sens = burst.sens;
 
-	// mag y and z axis is flipped around the x axis
-	buffer.sens.mag.y = -buffer.sens.mag.y;
-	buffer.sens.mag.z = -buffer.sens.mag.z;
+	// mag y and z axis is flipped around the x axis. The burst-read
+	// payload is big-endian (mag was BYTE_SWapped by slave-0 to match
+	// the accel/gyro layout), so swap into native order to negate, then
+	// swap back — otherwise we negate the byte-swapped representation
+	// and userspace sees scrambled values once IIO interprets the
+	// channel as IIO_BE.
+	buffer.sens.mag.y = cpu_to_be16(-(s16)be16_to_cpu(buffer.sens.mag.y));
+	buffer.sens.mag.z = cpu_to_be16(-(s16)be16_to_cpu(buffer.sens.mag.z));
 
 	// Latch the AK09916 overflow bit so userspace can detect a sample
 	// where any axis saturated the ±4912 µT measurement range. Sticky
