@@ -1,0 +1,66 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## What this is
+
+Out-of-tree Linux kernel IIO driver for the InvenSense/TDK **ICM-20948** 9-axis IMU (3-axis accel + 3-axis gyro + on-chip AK09916 magnetometer + temperature). Single translation unit (`icm20948.c`) plus a register header (`icm20948_regs.h`). The repo is a fork; the README states *"Currently only polled I2C mode is supported"* and the goal of work in this tree is to extend coverage toward full chip support.
+
+## Build / load / test
+
+```sh
+make                # builds icm20948.ko against /lib/modules/$(uname -r)/build
+make clean
+```
+
+Kernel headers for the running kernel must be installed; the Makefile uses `M=$(PWD) modules` against that build tree. There is no in-tree test suite — exercising the driver means cross-/native-building, copying `icm20948.ko` to the target (typically a Raspberry Pi or similar SBC with I2C bus + ICM-20948), then:
+
+```sh
+sudo insmod icm20948.ko
+# bind via device tree (compatible = "invensense,icm20948") or:
+echo icm20948 0x68 | sudo tee /sys/bus/i2c/devices/i2c-1/new_device
+# data appears under /sys/bus/iio/devices/iio:deviceN/
+sudo rmmod icm20948
+```
+
+Channels exposed (sysfs): `in_accel_{x,y,z}_raw`, `in_anglvel_{x,y,z}_raw`, `in_magn_{x,y,z}_raw`, `in_temp_raw`, plus `_scale`, `_calibbias` (accel/gyro only), and `_filter_low_pass_3db_frequency` attributes. Buffered capture works through `iio_triggered_buffer` and needs an external trigger (e.g. `hrtimer` via `iio-trig-hrtimer`) — the driver does not register its own trigger.
+
+## Architecture cheat sheet
+
+**Register-bank machine.** The chip has 4 banks; addresses are encoded as `(reg & 0xff) | (BANK_N << 8)` in `icm20948_regs.h`. All bus helpers (`icm20948_read_byte`/`_word`, `_write_byte`/`_word`) auto-select the bank via `icm20948_select_bank`, which caches `icm->bank_reg` to skip redundant `REG_BANK_SEL` writes. **Anything you add must go through these helpers** — open-coding `i2c_smbus_*` will desync the cached bank.
+
+**Magnetometer access.** The AK09916 mag is on an internal I2C bus behind the ICM20948 acting as I2C master. Two paths:
+- *Slave 4* (`icm20948_slave_{read,write}_byte`) — single-shot register R/W used during probe (mag WHO_AM_I check, reset, mode set). Polls `I2C_MST_STATUS` for `RV_I2C_SLV4_DONE`/`NACK`.
+- *Slave 0* — configured once in probe to **continuously DMA** 8 mag bytes (`ICM20948_MAG_DATA_T`) into `EXT_SLV_SENS_DATA_00..07`, with byte-swap (`RV_I2C_SLV0_BYTE_SW`) so mag little-endian words land in the same big-endian layout as the accel/gyro registers. That's why `icm20948_read` can grab accel+gyro+temp+mag as one packed `ICM20948_SENS_DATA_T` block.
+
+**Lookup tables for scale/filter.** `ICM20948_LOOKUP_HEAD_T` entries (`icm20948_accel_filter_lookup`, `_anglvel_filter_lookup`, `_temp_filter_lookup`, `_accel_scale_lookup`, `_anglvel_scale_lookup`) map between user-visible `(val, val2)` pairs and the bit patterns to OR into a config register. `icm20948_read_raw` / `_write_raw` first sweep this table to handle scale and DLPF, then fall through to a per-channel-type switch for `RAW`, `CALIBBIAS`, `SCALE`, `OFFSET`. To add a new tunable (e.g. mag mode, sample rate), the cleanest path is usually a new lookup table plus an `IIO_DEVICE_ATTR(..._available, …)` line for sysfs discoverability.
+
+**Axis & sign conventions.** Magnetometer Y and Z are inverted (vs. accel/gyro) in two places that must stay in sync: `icm20948_trigger_handler` (buffered path) and the `IIO_MAGN` case in `icm20948_read_raw` (sysfs raw path). The `c3ea032` and `e5b5291` commits in `git log` are where this was introduced — touch with care.
+
+**Locking.** A single `icm->lock` mutex serialises all bus access (which implicitly serialises bank selection). Helpers do **not** take the lock; callers must. The slave-4 helpers `icm20948_slave_{read,write}_byte` are exceptions — they take it themselves and call multi-step sequences while holding it.
+
+## Coverage map — what the chip supports vs. what this driver wires up
+
+Useful when planning improvements toward full ICM-20948 support. The register header already defines many symbols the driver never references.
+
+| Feature | Chip | Driver |
+|---|---|---|
+| I2C bus | ✓ | ✓ |
+| SPI bus | ✓ | ✗ (no SPI probe; `RV_I2C_IF_DIS` defined but unused) |
+| Accel/gyro raw + scale + DLPF | ✓ | ✓ (lookups in `icm20948.c`) |
+| Calibration bias (XA/XG offset regs) | ✓ | ✓ accel + gyro |
+| Magnetometer raw | ✓ | ✓ (via slave-0 burst) |
+| Magnetometer scale | ✓ | ✓ (hardcoded 4912/32752; AK09916 has fixed sensitivity, no ASA registers like AK8963 had) |
+| Magnetometer mode (single/10/20/50/100 Hz) | ✓ (`RV_MAG_MODE_*` in regs.h) | ✗ hardcoded to 100 Hz at probe |
+| Magnetometer overflow flag (`RV_MAG_HOFL`/`MAG_ST2`) | ✓ | ✗ not surfaced |
+| Hardware FIFO (`FIFO_*` regs) | ✓ | ✗ regs defined, never enabled |
+| Data-ready / motion interrupt (`INT_*`, `INT_PIN_CFG`) | ✓ | ✗ no IRQ handler; relies on external poll trigger |
+| Sample rate divider (`GYRO_SMPLRT_DIV`, `ACCEL_SMPLRT_DIV_*`) | ✓ | ✗ |
+| Wake-on-Motion (`ACCEL_INTEL_CTRL`, `ACCEL_WOM_THR`) | ✓ | ✗ |
+| Low-power / cycle modes (`LP_CONFIG`, `RV_LP_EN`, `PWR_MGMT_2`) | ✓ | ✗ (only full power, `RV_CLKSEL_0`) |
+| Temperature disable (`RV_DEVICE_TEMP_DIS`) | ✓ | ✗ |
+| Accel/gyro self-test (`SELF_TEST_*_GYRO/ACCEL`) | ✓ | ✗ |
+| DMP (Digital Motion Processor) | ✓ | ✗ (firmware blob required) |
+| Mount matrix (DT `mount-matrix`) | — | ✓ |
+
+When adding any of the missing features, follow the established patterns: extend the lookup tables for enumerated configs, add a slave-4 helper call sequence for mag-side state, and keep all register access funnelled through the bank-aware helpers.
