@@ -170,6 +170,16 @@
 #define RV_ACCEL_FS_SEL(x)	((x & 0x03) << 1)
 #define RV_ACCEL_DLPFCFG(x)	((x & 0x07) << 3)
 
+#define RV_INT_BYPASS_EN		(1 << 1)
+#define RV_INT_FSYNC_INT_MODE_EN	(1 << 2)
+#define RV_INT_ACTL_FSYNC		(1 << 3)
+#define RV_INT_ANYRD_2CLEAR		(1 << 4)
+#define RV_INT1_LATCH_EN		(1 << 5)
+#define RV_INT1_OPEN			(1 << 6)
+#define RV_INT1_ACTL			(1 << 7)
+
+#define RV_RAW_DATA_0_RDY_EN		(1 << 0)
+
 #define RV_TEMP_DLPFCFG_0	(1 << 0)
 #define RV_TEMP_DLPFCFG_1	(1 << 1)
 #define RV_TEMP_DLPFCFG_2	(1 << 2)

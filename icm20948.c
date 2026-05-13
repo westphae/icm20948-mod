@@ -8,8 +8,11 @@
 #include <linux/iio/iio.h>
 #include <linux/iio/sysfs.h>
 #include <linux/iio/buffer.h>
+#include <linux/iio/trigger.h>
 #include <linux/iio/triggered_buffer.h>
 #include <linux/iio/trigger_consumer.h>
+#include <linux/interrupt.h>
+#include <linux/irq.h>
 
 #include "icm20948_regs.h"
 
@@ -49,6 +52,7 @@ typedef enum {
 typedef struct {
 	struct i2c_client *client;
 	struct iio_mount_matrix orientation;
+	struct iio_trigger *trig;	/* data-ready IRQ trigger; NULL if no IRQ wired */
 	struct mutex lock;
 	uint8_t bank_reg;
 	uint8_t mag_overrange;	/* sticky AK09916 HOFL; cleared by writing 0 to in_magn_overrange */
@@ -483,6 +487,99 @@ static int icm20948_write_lookup(ICM20948_DATA_T *icm,
 	}
 
 	return -EINVAL;
+}
+
+/*
+ * Data-ready trigger: enable/disable the chip's RAW_DATA_0_RDY interrupt.
+ * Called by the IIO core when userspace selects this trigger as the buffer's
+ * driving trigger (enable=true) or deselects it (enable=false).
+ */
+static int icm20948_data_rdy_trigger_set_state(struct iio_trigger *trig,
+					       bool enable)
+{
+	struct iio_dev *indio_dev = iio_trigger_get_drvdata(trig);
+	ICM20948_DATA_T *icm = (ICM20948_DATA_T *) iio_priv(indio_dev);
+	int ret;
+
+	mutex_lock(&icm->lock);
+	ret = icm20948_write_byte(icm, INT_ENABLE_1,
+		enable ? RV_RAW_DATA_0_RDY_EN : 0);
+	mutex_unlock(&icm->lock);
+	return ret;
+}
+
+static const struct iio_trigger_ops icm20948_trigger_ops = {
+	.set_trigger_state = icm20948_data_rdy_trigger_set_state,
+};
+
+/*
+ * Register a data-ready IRQ trigger if the i2c_client has an IRQ wired
+ * via DT (interrupts = <...>). No-op otherwise — the driver still works,
+ * just requires an external trigger (e.g. iio-trig-hrtimer) for buffered
+ * capture.
+ */
+static int icm20948_setup_data_rdy_trigger(struct iio_dev *indio_dev)
+{
+	ICM20948_DATA_T *icm = (ICM20948_DATA_T *) iio_priv(indio_dev);
+	struct i2c_client *client = icm->client;
+	unsigned long irq_flags;
+	int ret;
+
+	if (client->irq <= 0) {
+		return 0;
+	}
+
+	/*
+	 * INT1 active-high, push-pull, latched, with any-register-read
+	 * clearing the latch. The triggered_buffer handler does an I2C bulk
+	 * read on every sample, which deasserts INT1 well before the next
+	 * data-ready event.
+	 */
+	ret = icm20948_write_byte(icm, INT_PIN_CFG,
+		RV_INT1_LATCH_EN | RV_INT_ANYRD_2CLEAR);
+	if (ret < 0) {
+		return ret;
+	}
+
+	/* INT_ENABLE_1 is left cleared; set_trigger_state turns it on. */
+	ret = icm20948_write_byte(icm, INT_ENABLE_1, 0);
+	if (ret < 0) {
+		return ret;
+	}
+
+	icm->trig = devm_iio_trigger_alloc(&client->dev, "%s-dev%d",
+		indio_dev->name, iio_device_id(indio_dev));
+	if (!icm->trig) {
+		return -ENOMEM;
+	}
+	icm->trig->ops = &icm20948_trigger_ops;
+	iio_trigger_set_drvdata(icm->trig, indio_dev);
+
+	ret = devm_iio_trigger_register(&client->dev, icm->trig);
+	if (ret < 0) {
+		return ret;
+	}
+
+	/* Auto-attach so userspace gets a working trigger out of the box. */
+	indio_dev->trig = iio_trigger_get(icm->trig);
+
+	/* Honour DT-specified IRQ trigger type if any; fall back to rising. */
+	irq_flags = irqd_get_trigger_type(irq_get_irq_data(client->irq));
+	if (!irq_flags) {
+		irq_flags = IRQF_TRIGGER_RISING;
+	}
+
+	ret = devm_request_irq(&client->dev, client->irq,
+		iio_trigger_generic_data_rdy_poll, irq_flags,
+		"icm20948", icm->trig);
+	if (ret < 0) {
+		return ret;
+	}
+
+	dev_info(&client->dev,
+		"data-ready trigger %s on IRQ %d\n",
+		icm->trig->name, client->irq);
+	return 0;
 }
 
 static irqreturn_t icm20948_trigger_handler(int irq, void *p)
@@ -1016,6 +1113,13 @@ static int icm20948_i2c_probe(struct i2c_client *client)
 	ret = iio_triggered_buffer_setup(indio_dev, NULL, icm20948_trigger_handler, NULL);
 	if (ret < 0) {
 		dev_err(&client->dev, "IIO triggered buffer setup failed\n");
+		return ret;
+	}
+
+	ret = icm20948_setup_data_rdy_trigger(indio_dev);
+	if (ret < 0) {
+		iio_triggered_buffer_cleanup(indio_dev);
+		dev_err(&client->dev, "data-ready trigger setup failed\n");
 		return ret;
 	}
 

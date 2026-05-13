@@ -27,7 +27,7 @@ sudo rmmod icm20948
 
 For a one-shot regression check against a real ICM-20948 (must be held stationary during the run), `tests/smoke.sh` builds, loads, binds, range-checks every `*_raw` channel, exercises the buffered path via `iio-trig-hrtimer`, verifies monotonic timestamps, and unwinds on every exit path. `I2C_BUS`, `I2C_ADDR`, `TRIG_HZ`, `CAPTURE_SAMPLES` are env-overridable.
 
-Channels exposed (sysfs): `in_accel_{x,y,z}_raw`, `in_anglvel_{x,y,z}_raw`, `in_magn_{x,y,z}_raw`, `in_temp_raw`, plus `_scale`, `_calibbias` (accel/gyro only), and `_filter_low_pass_3db_frequency` attributes. There's also `in_magn_overrange` — a sticky 0/1 flag set by the buffered trigger handler whenever the AK09916's ST2 reports HOFL on a sample (any axis saturated ±4912 µT); cleared by `echo 0 > in_magn_overrange`. Buffered capture works through `iio_triggered_buffer` and needs an external trigger (e.g. `hrtimer` via `iio-trig-hrtimer`) — the driver does not register its own trigger.
+Channels exposed (sysfs): `in_accel_{x,y,z}_raw`, `in_anglvel_{x,y,z}_raw`, `in_magn_{x,y,z}_raw`, `in_temp_raw`, plus `_scale`, `_calibbias` (accel/gyro only), and `_filter_low_pass_3db_frequency` attributes. There's also `in_magn_overrange` — a sticky 0/1 flag set by the buffered trigger handler whenever the AK09916's ST2 reports HOFL on a sample (any axis saturated ±4912 µT); cleared by `echo 0 > in_magn_overrange`. Buffered capture works through `iio_triggered_buffer`; if the chip's INT1 pin is wired to a GPIO and declared in DT (`interrupts = <...>` on the icm20948 node), the driver registers its own **data-ready trigger** named `icm20948-dev<N>` and auto-attaches it. Without an IRQ in DT, the driver still works but you need an external trigger (e.g. `iio-trig-hrtimer`).
 
 ## Architecture cheat sheet
 
@@ -59,7 +59,8 @@ Useful when planning improvements toward full ICM-20948 support. The register he
 | Magnetometer mode (single/10/20/50/100 Hz) | ✓ (`RV_MAG_MODE_*` in regs.h) | ✗ hardcoded to single-measurement, re-armed each aux cycle (~100 Hz). Continuous-mode CNTL2 writes silently fail on AK09916 via slave-4 — see the slave-1 retrigger pattern in probe before changing this. |
 | Magnetometer overflow flag (`RV_MAG_HOFL`/`MAG_ST2`) | ✓ | ✓ sticky sysfs `in_magn_overrange`, latched from each buffered sample |
 | Hardware FIFO (`FIFO_*` regs) | ✓ | ✗ regs defined, never enabled |
-| Data-ready / motion interrupt (`INT_*`, `INT_PIN_CFG`) | ✓ | ✗ no IRQ handler; relies on external poll trigger |
+| Data-ready interrupt (`INT_PIN_CFG`, `INT_ENABLE_1.RAW_DATA_0_RDY_EN`) | ✓ | ✓ optional `iio_trigger` registered when DT supplies an IRQ on the i2c_client |
+| Motion interrupt (Wake-on-Motion, FSYNC, etc.) | ✓ | ✗ |
 | Sample rate divider (`GYRO_SMPLRT_DIV`, `ACCEL_SMPLRT_DIV_*`) | ✓ | ✗ |
 | Wake-on-Motion (`ACCEL_INTEL_CTRL`, `ACCEL_WOM_THR`) | ✓ | ✗ |
 | Low-power / cycle modes (`LP_CONFIG`, `RV_LP_EN`, `PWR_MGMT_2`) | ✓ | ✗ (only full power, `RV_CLKSEL_0`) |

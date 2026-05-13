@@ -67,6 +67,10 @@ After reboot the kernel matches the overlay's `compatible = "invensense,icm20948
 
 If your sensor is on a different I2C bus or address, edit `dts/icm20948-overlay.dts` (change `target = <&i2c1>`) or pass an address override on the overlay line, e.g. `dtoverlay=icm20948,addr=0x69` (AD0 tied high).
 
+### Optional: data-ready interrupt
+
+If the chip's INT1 pin is wired to a Pi GPIO, you can have the driver register its own data-ready trigger instead of relying on `iio-trig-hrtimer` for buffered capture. Uncomment the `interrupt-parent` / `interrupts` lines in `dts/icm20948-overlay.dts`, set the GPIO number to whatever you've wired (the example uses GPIO17), rebuild and reinstall the overlay. After reboot a new trigger appears as `icm20948-devN` under `/sys/bus/iio/devices/triggerN/` and is auto-attached to the IIO device. If the IRQ isn't declared in DT, the driver silently skips this and behaves as before.
+
 Dev / one-shot (no reboot)
 --------------------------
 For an iterative build-test loop without touching `config.txt`:
