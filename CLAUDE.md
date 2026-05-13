@@ -33,9 +33,10 @@ Channels exposed (sysfs): `in_accel_{x,y,z}_raw`, `in_anglvel_{x,y,z}_raw`, `in_
 
 **Register-bank machine.** The chip has 4 banks; addresses are encoded as `(reg & 0xff) | (BANK_N << 8)` in `icm20948_regs.h`. All bus helpers (`icm20948_read_byte`/`_word`, `_write_byte`/`_word`) auto-select the bank via `icm20948_select_bank`, which caches `icm->bank_reg` to skip redundant `REG_BANK_SEL` writes. **Anything you add must go through these helpers** — open-coding `i2c_smbus_*` will desync the cached bank.
 
-**Magnetometer access.** The AK09916 mag is on an internal I2C bus behind the ICM20948 acting as I2C master. Two paths:
-- *Slave 4* (`icm20948_slave_{read,write}_byte`) — single-shot register R/W used during probe (mag WHO_AM_I check, reset, mode set). Polls `I2C_MST_STATUS` for `RV_I2C_SLV4_DONE`/`NACK`.
-- *Slave 0* — configured once in probe to **continuously DMA** 8 mag bytes (`ICM20948_MAG_DATA_T`) into `EXT_SLV_SENS_DATA_00..07`, with byte-swap (`RV_I2C_SLV0_BYTE_SW`) so mag little-endian words land in the same big-endian layout as the accel/gyro registers. That's why `icm20948_read` can grab accel+gyro+temp+mag as one packed `ICM20948_SENS_DATA_T` block.
+**Magnetometer access.** The AK09916 mag is on an internal I2C bus behind the ICM20948 acting as I2C master. Three paths, all coexist after probe:
+- *Slave 4* (`icm20948_slave_{read,write}_byte`) — single-shot register R/W used during probe (mag WHO_AM_I check, soft reset). Polls `I2C_MST_STATUS` for `RV_I2C_SLV4_DONE`/`NACK`. **Do not try to write CNTL2 to a continuous mode (0x02/0x04/0x06/0x08) via slave-4** — the AK09916 silently rejects these even though the I2C transaction ACKs, leaving the mag in power-down. Single-measurement (0x01) is the only mode that works through this path, and even that is unreliable as a one-shot.
+- *Slave 0* — configured once in probe to **continuously DMA** 8 mag bytes (`ICM20948_MAG_DATA_T`) into `EXT_SLV_SENS_DATA_00..07`, with byte-swap (`RV_I2C_SLV0_BYTE_SW`) so mag little-endian words land in the same big-endian layout as the accel/gyro registers. That's why `icm20948_read` can grab accel+gyro+temp+mag as one packed `ICM20948_SENS_DATA_T` block. The trailing ST2 byte in each burst releases the AK09916's measurement lock so the next single-shot can fire.
+- *Slave 1* — used as a re-arm for CNTL2=SINGLE on every aux-master cycle. This is the only way we've found to get the AK09916 to actually measure: drive `MAG_CNTL2 = RV_MAG_MODE_SINGLE` from slave-1, read the result via slave-0 on the next cycle. The aux master is throttled to ~100 Hz (gyro/11) via `I2C_SLV4_CTRL[4:0]` + `I2C_MST_DELAY_CTRL`, slow enough that each ~7.5 ms measurement completes before the next trigger. **Order matters**: write the delay value and `MST_DELAY_CTRL` *before* setting slave-0/1 EN bits, otherwise slaves fire at the full ~1 kHz gyro rate for a few µs and wedge the AK09916.
 
 **Lookup tables for scale/filter.** `ICM20948_LOOKUP_HEAD_T` entries (`icm20948_accel_filter_lookup`, `_anglvel_filter_lookup`, `_temp_filter_lookup`, `_accel_scale_lookup`, `_anglvel_scale_lookup`) map between user-visible `(val, val2)` pairs and the bit patterns to OR into a config register. `icm20948_read_raw` / `_write_raw` first sweep this table to handle scale and DLPF, then fall through to a per-channel-type switch for `RAW`, `CALIBBIAS`, `SCALE`, `OFFSET`. To add a new tunable (e.g. mag mode, sample rate), the cleanest path is usually a new lookup table plus an `IIO_DEVICE_ATTR(..._available, …)` line for sysfs discoverability.
 
@@ -55,7 +56,7 @@ Useful when planning improvements toward full ICM-20948 support. The register he
 | Calibration bias (XA/XG offset regs) | ✓ | ✓ accel + gyro |
 | Magnetometer raw | ✓ | ✓ (via slave-0 burst) |
 | Magnetometer scale | ✓ | ✓ (hardcoded 4912/32752; AK09916 has fixed sensitivity, no ASA registers like AK8963 had) |
-| Magnetometer mode (single/10/20/50/100 Hz) | ✓ (`RV_MAG_MODE_*` in regs.h) | ✗ hardcoded to 100 Hz at probe |
+| Magnetometer mode (single/10/20/50/100 Hz) | ✓ (`RV_MAG_MODE_*` in regs.h) | ✗ hardcoded to single-measurement, re-armed each aux cycle (~100 Hz). Continuous-mode CNTL2 writes silently fail on AK09916 via slave-4 — see the slave-1 retrigger pattern in probe before changing this. |
 | Magnetometer overflow flag (`RV_MAG_HOFL`/`MAG_ST2`) | ✓ | ✗ not surfaced |
 | Hardware FIFO (`FIFO_*` regs) | ✓ | ✗ regs defined, never enabled |
 | Data-ready / motion interrupt (`INT_*`, `INT_PIN_CFG`) | ✓ | ✗ no IRQ handler; relies on external poll trigger |
