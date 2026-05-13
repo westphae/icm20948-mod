@@ -1,5 +1,6 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/version.h>
 #include <linux/err.h>
 #include <linux/i2c.h>
 #include <linux/of.h>
@@ -814,12 +815,23 @@ static int icm20948_write_raw(struct iio_dev *indio_dev,
 	int ret;
 
 	// allow writes on idle state only
-	if (!iio_device_claim_direct(indio_dev)) {
+	// iio_device_claim_direct() replaced _mode variant in v6.13
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
+	if (!iio_device_claim_direct(indio_dev))
 		return -EBUSY;
-	}
+#else
+	ret = iio_device_claim_direct_mode(indio_dev);
+	if (ret)
+		return ret;
+#endif
 
 	ret = icm20948_write_raw_int(indio_dev, chan, val, val2, mask);
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
 	iio_device_release_direct(indio_dev);
+#else
+	iio_device_release_direct_mode(indio_dev);
+#endif
 	return ret;
 }
 
