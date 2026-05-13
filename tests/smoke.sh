@@ -168,7 +168,13 @@ check_sysfs() {
 
 setup_trigger() {
     log "set up hrtimer trigger @ ${TRIG_HZ} Hz"
-    $SUDO modprobe iio-trig-hrtimer || die "modprobe iio-trig-hrtimer failed"
+    # Capture stderr so a stale `modules.dep` reference (files that show up
+    # in dep but aren't on disk — common when /root/linux hasn't been
+    # `modules_install`'d) doesn't poison the test output. Surface stderr
+    # only if modprobe actually fails.
+    local mp_out
+    mp_out=$($SUDO modprobe iio-trig-hrtimer 2>&1) \
+        || die "modprobe iio-trig-hrtimer failed: ${mp_out:-no output}"
     find_configfs || die "configfs not available; can't create hrtimer trigger"
 
     $SUDO mkdir -p "$CONFIGFS/iio/triggers/hrtimer/$TRIG_NAME" \
