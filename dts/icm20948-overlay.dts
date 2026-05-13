@@ -1,0 +1,38 @@
+/*
+ * Device-tree overlay for the InvenSense/TDK ICM-20948 9-axis IMU on the
+ * Raspberry Pi user-facing I2C bus (i2c-1, GPIO 2/3).
+ *
+ * Build:        dtc -@ -I dts -O dtb -o icm20948.dtbo icm20948-overlay.dts
+ * Activate:     copy to /boot/firmware/overlays/ then add to /boot/firmware/config.txt:
+ *                 dtoverlay=icm20948               # defaults to addr 0x68
+ *                 dtoverlay=icm20948,addr=0x69     # AD0 pin tied high
+ *
+ * If your sensor is on a different I2C bus, change `target = <&i2c1>` below.
+ */
+
+/dts-v1/;
+/plugin/;
+
+/ {
+	compatible = "brcm,bcm2835";
+
+	fragment@0 {
+		target = <&i2c1>;
+		__overlay__ {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "okay";
+
+			icm20948: icm20948@68 {
+				compatible = "invensense,icm20948";
+				reg = <0x68>;
+				status = "okay";
+				/* mount-matrix = "1","0","0","0","1","0","0","0","1"; */
+			};
+		};
+	};
+
+	__overrides__ {
+		addr = <&icm20948>,"reg:0";
+	};
+};
