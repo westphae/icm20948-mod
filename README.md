@@ -166,6 +166,17 @@ echo 0x68 | sudo tee /sys/bus/i2c/devices/i2c-1/delete_device
 sudo rmmod icm20948
 ```
 
+### Live terminal viewers
+
+Two interactive examples under `examples/` render the chip's output in real time and let you cycle the scale/DLPF settings from the keyboard. Both need the driver loaded and bound.
+
+```sh
+sudo ./examples/imu_view.sh             # single-shot sysfs reads (~5 Hz)
+sudo ./examples/imu_view_buffered.sh    # iio-trig-hrtimer + /dev/iio:deviceN buffered capture
+```
+
+Hotkeys (same in both): **`a`/`g`** cycle accel/gyro full-scale range, **`A`/`G`** cycle their DLPF cutoffs, **`o`** clears the sticky `in_magn_overrange` flag, **`q`** quits. The buffered viewer also shows the live frame rate, a 1-second running mean per axis, and the latest sample's timestamp; it tears down the hrtimer trigger on exit.
+
 ### Regression tests
 
 `tests/all.sh` runs four focused regression scripts against an *already-bound* device (the DT overlay's auto-bind is fine). Hold the sensor stationary during the run (~40 s). Failures point at recent classes of bug we've fixed:
