@@ -629,22 +629,31 @@ static irqreturn_t icm20948_trigger_handler(int irq, void *p)
 	}
 
 	// Aux-master glitch filter. ~1% of buffered samples come back with
-	// EXT_SLV_SENS_DATA_00..07 all zero — the chip's I2C master NACKed
-	// the AK09916 on that cycle (I2C_MST_STATUS shows SLV0/1/2_NACK
-	// flags) and zeroed the slave registers. Mag readings of exactly
-	// (0,0,0) are physically impossible in any non-degenerate field, so
-	// substitute the previous good sample to keep the buffered stream
-	// continuous.
-	if (burst.sens.mag.x == 0 && burst.sens.mag.y == 0 &&
-	    burst.sens.mag.z == 0) {
+	// some bytes of the slave-0 burst filled with 0x00 (bus held low)
+	// or 0xFF (bus pulled up) — the chip's I2C master NACKed the
+	// AK09916 partway through the 8-byte read. The NACK can happen at
+	// any byte boundary, so corruption affects any contiguous tail of
+	// the {mag.x, mag.y, mag.z} axes. An axis reading exactly 0 or -1
+	// (= 0xFFFF) is overwhelmingly more likely to be a glitch than a
+	// real measurement of magnitude ≤ 0.15 µT, so substitute that axis
+	// alone from the most recent good sample.
+#define AX_IS_GLITCH(v) ((v) == 0 || (v) == (int16_t)0xFFFF)
+	if (AX_IS_GLITCH(burst.sens.mag.x)) {
 		burst.sens.mag.x = icm->last_mag_x;
-		burst.sens.mag.y = icm->last_mag_y;
-		burst.sens.mag.z = icm->last_mag_z;
 	} else {
 		icm->last_mag_x = burst.sens.mag.x;
+	}
+	if (AX_IS_GLITCH(burst.sens.mag.y)) {
+		burst.sens.mag.y = icm->last_mag_y;
+	} else {
 		icm->last_mag_y = burst.sens.mag.y;
+	}
+	if (AX_IS_GLITCH(burst.sens.mag.z)) {
+		burst.sens.mag.z = icm->last_mag_z;
+	} else {
 		icm->last_mag_z = burst.sens.mag.z;
 	}
+#undef AX_IS_GLITCH
 
 	buffer.sens = burst.sens;
 
