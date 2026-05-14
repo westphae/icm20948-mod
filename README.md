@@ -67,6 +67,57 @@ After reboot the kernel matches the overlay's `compatible = "invensense,icm20948
 
 If your sensor is on a different I2C bus or address, edit `dts/icm20948-overlay.dts` (change `target = <&i2c1>`) or pass an address override on the overlay line, e.g. `dtoverlay=icm20948,addr=0x69` (AD0 tied high).
 
+Userspace interface
+-------------------
+
+Once the driver is bound, the chip presents as a single IIO device under `/sys/bus/iio/devices/iio:deviceN/` (the exact `N` depends on enumeration order — find it by reading the `name` file in each `iio:device*` entry; the one that reads `icm20948` is yours). All values follow the standard Linux IIO ABI: a `_raw` ADC reading is converted to physical units via the channel's `_scale` (and `_offset`, for temperature). Files are read-only unless noted as **(w)** below.
+
+```
+/sys/bus/iio/devices/iio:deviceN/
+├── name                                    # "icm20948"
+├── in_mount_matrix                         # 3×3 sensor→board orientation (from DT)
+├── in_accel_{x,y,z}_raw                    # ADC counts, signed 16-bit
+├── in_accel_{x,y,z}_calibbias        (w)   # subtracted from raw before output
+├── in_accel_scale                    (w)   # m/s² per LSB; set to one of:
+├── in_accel_scale_available                #   the four full-scale ranges
+├── in_accel_filter_low_pass_3db_frequency  (w)
+├── in_accel_filter_low_pass_3db_frequency_available
+├── in_anglvel_{x,y,z}_raw                  # ADC counts, signed 16-bit
+├── in_anglvel_{x,y,z}_calibbias      (w)   # subtracted from raw before output
+├── in_anglvel_scale                  (w)   # rad/s per LSB; one of four ranges
+├── in_anglvel_scale_available
+├── in_anglvel_filter_low_pass_3db_frequency  (w)
+├── in_anglvel_filter_low_pass_3db_frequency_available
+├── in_magn_{x,y,z}_raw                     # ADC counts, signed 16-bit
+├── in_magn_scale                           # Gauss per LSB (fixed; AK09916 has no PGA)
+├── in_magn_overrange                 (w)   # sticky 0/1 — see below
+├── in_temp_raw                             # ADC counts, signed 16-bit
+├── in_temp_scale                           # millidegrees-C per LSB
+├── in_temp_offset                          # additive offset in output units
+├── in_temp_filter_low_pass_3db_frequency  (w)
+├── in_temp_filter_low_pass_3db_frequency_available
+├── scan_elements/                          # used by triggered buffered capture
+├── buffer/                                 #   (length, enable)
+└── trigger/                                #   (current_trigger)
+```
+
+| Channel | Unit | Default range | Full-scale options (write to `_scale`) |
+|---|---|---|---|
+| `in_accel_*` | m/s² | ±2 g (~19.6 m/s²) | 2 / 4 / 8 / 16 g |
+| `in_anglvel_*` | rad/s | ±250 dps (~4.36 rad/s) | 250 / 500 / 1000 / 2000 dps |
+| `in_magn_*` | Gauss | ±4.9 G (fixed) | — |
+| `in_temp` | milli-°C | — | — |
+
+To convert a raw reading: **`value = (raw + calibbias) * scale`** for accel/gyro/mag, and **`temp_milliC = raw * scale + offset`** for temperature (chip datasheet formula: `T °C = raw / 333.87 + 21`).
+
+The `scan_elements/in_*_en` files (write-only 0/1) toggle which channels participate in buffered capture. The driver registers a fixed scan mask that enables all data channels plus the timestamp — you don't need to pick a subset. Buffered output is a packed 32-byte frame per sample: `accel.{x,y,z}` (6 B big-endian) · `anglvel.{x,y,z}` (6 B) · `temp` (2 B) · `magn.{x,y,z}` (6 B) · 4 B alignment pad · `timestamp` (8 B little-endian, ns since boot). The endianness/storagebits/shift of every channel is exposed under `scan_elements/in_*_type` for tools that need to decode the frames programmatically (`libiio` and friends do this automatically).
+
+**`in_magn_overrange`** is the chip's `MAG_ST2.HOFL` bit latched across the buffered stream — set whenever any mag axis saturated the ±4912 µT range on any captured sample, cleared by writing `0`. Use it to detect transient saturation events that would otherwise be lost between userspace polls.
+
+**`in_mount_matrix`** is a row-major 3×3 matrix string populated from the DT `mount-matrix` property if present, otherwise the identity. Use it to rotate accel/gyro/mag samples from the chip's body frame into your board's reference frame.
+
+Buffered streaming needs a trigger. If `dts/icm20948-overlay.dts` declares an `interrupts` entry tied to the chip's INT1 pin, the driver registers an `iio_trigger` named `icm20948-devN` and auto-attaches it (no `trigger/current_trigger` write needed). Otherwise create an `iio-trig-hrtimer` and write its name into `trigger/current_trigger` — see the `tests/buffered_stream.sh` helper or upstream IIO documentation.
+
 ### rpi-update kernels: also install the in-tree modules
 
 `make install` installs *only* our `icm20948.ko`, not the in-tree kernel modules it depends on (`i2c-bcm2835`, `industrialio`, `industrialio-triggered-buffer`, `iio-trig-hrtimer`, …). On a distro-packaged kernel those modules are shipped by the kernel package and already live under `/lib/modules/$(uname -r)/kernel/`. On an `rpi-update` kernel they are **not** — the firmware deploys only the bootable kernel image, not the bundled module set — so after reboot you see symptoms like:
@@ -114,6 +165,23 @@ echo "icm20948 0x68" | sudo tee /sys/bus/i2c/devices/i2c-1/new_device
 echo 0x68 | sudo tee /sys/bus/i2c/devices/i2c-1/delete_device
 sudo rmmod icm20948
 ```
+
+### Regression tests
+
+`tests/all.sh` runs four focused regression scripts against an *already-bound* device (the DT overlay's auto-bind is fine). Hold the sensor stationary during the run (~40 s). Failures point at recent classes of bug we've fixed:
+
+```sh
+sudo ./tests/all.sh
+```
+
+| Script | What it covers |
+|---|---|
+| `tests/sysfs_stream.sh` | Polls every channel via `in_*_raw`. Catches sysfs-path regressions (wedged chip, scale flips). |
+| `tests/buffered_stream.sh` | Streams 500 buffered samples via `iio-trig-hrtimer`, asserts no `mag = (0,0,0)` / `(-1,-1,-1)` glitches and per-axis 5–95 % spread stays in noise. Direct regression test for the byte-swap fix and aux-master NACK filter. |
+| `tests/consistency.sh` | Compares per-channel medians from the sysfs and buffered paths — catches decode/sign divergence between them. |
+| `tests/bind_cycle.sh` | Unbind/rebind ×5, watches `dmesg` for refcount/use-after-free. Regression test for the `indio_dev->trig` cleanup. |
+
+Tunable thresholds (sample counts, spread/delta tolerances, trigger rate) are env-overridable — see the heading comments in each script.
 
 Troubleshooting
 ---------------
