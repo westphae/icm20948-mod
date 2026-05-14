@@ -392,14 +392,34 @@ static ssize_t icm20948_show_available(struct device *dev,
 	const ICM20948_LOOKUP_ITEM_T *item;
 	ssize_t len = 0;
 
+	/*
+	 * iio_format_value()'s underlying sysfs_emit() requires its buf
+	 * argument to be page-aligned, so calling it with &buf[len] for
+	 * subsequent items triggers a kernel WARN and returns 0 — leaving
+	 * the _available file with only the first entry. Use sysfs_emit_at,
+	 * which takes the page-aligned buf plus the offset.
+	 */
 	for (item = lookup->items; item->reg_val >= 0; item++) {
 		if (len > 0) {
-			buf[len - 1] = ' ';
+			len += sysfs_emit_at(buf, len, " ");
 		}
-
-		len +=  iio_format_value(&buf[len], lookup->type, 0, (int *) item->vals);
+		switch (lookup->type) {
+		case IIO_VAL_INT:
+			len += sysfs_emit_at(buf, len, "%d", item->vals[0]);
+			break;
+		case IIO_VAL_INT_PLUS_MICRO:
+			len += sysfs_emit_at(buf, len, "%d.%06u",
+					     item->vals[0], item->vals[1]);
+			break;
+		case IIO_VAL_INT_PLUS_NANO:
+			len += sysfs_emit_at(buf, len, "%d.%09u",
+					     item->vals[0], item->vals[1]);
+			break;
+		default:
+			return -EINVAL;
+		}
 	}
-
+	len += sysfs_emit_at(buf, len, "\n");
 	return len;
 }
 
