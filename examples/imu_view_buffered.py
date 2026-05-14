@@ -8,8 +8,11 @@ accel / gyro full-scale range and DLPF cutoffs by briefly pausing the buffer
 (the driver's iio_device_claim_direct check rejects those writes while
 streaming).
 
-Run after the driver is loaded and bound. Needs root: configfs trigger
-creation, sysfs writes, and /dev/iio:deviceN open all want it.
+Run after the driver is loaded and bound. Works as a normal user if the
+udev rules in /etc/udev/rules.d/99-iio.rules (and the tmpfiles entry for
+the hrtimer configfs dir) grant your group write access to the iio sysfs
+attributes, /dev/iio:deviceN, and /sys/kernel/config/iio/triggers/hrtimer.
+Otherwise run with sudo.
 
 Env overrides:  TRIG_NAME (default "icm20948-example"), TRIG_HZ (default 100).
 """
@@ -99,13 +102,25 @@ def setup_trigger():
         trig_dir.mkdir()
         atexit.register(lambda: trig_dir.rmdir() if trig_dir.exists() else None)
 
+    # configfs mkdir creates the sysfs trigger synchronously, but our udev
+    # rule that chmods its attributes to the plugdev group runs async — so
+    # without settling, the sampling_frequency write below can race.
+    subprocess.run(["udevadm", "settle", "--timeout=2"], check=False,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
     for t in IIO_ROOT.glob("trigger*"):
         try:
-            if (t / "name").read_text().strip() == TRIG_NAME:
-                wr(t / "sampling_frequency", TRIG_HZ)
-                return t
+            name = (t / "name").read_text().strip()
         except OSError:
             continue
+        if name != TRIG_NAME:
+            continue
+        try:
+            wr(t / "sampling_frequency", TRIG_HZ)
+        except PermissionError:
+            sys.exit(f"can't write {t}/sampling_frequency — install the "
+                     "udev rule for the iio subsystem or run with sudo")
+        return t
     sys.exit(f"hrtimer trigger {TRIG_NAME} not visible under {IIO_ROOT}")
 
 
