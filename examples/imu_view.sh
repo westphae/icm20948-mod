@@ -24,7 +24,12 @@ if [ -z "$DEV" ]; then
     exit 1
 fi
 
-exec python3 - "$DEV" <<'PYEOF'
+# Stash the Python in a temp file rather than piping it on stdin —
+# `python3 - "$DEV"` consumes stdin as the script source, leaving
+# curses with no TTY to read keypresses from.
+PY=$(mktemp --suffix=.py)
+trap 'rm -f "$PY"' EXIT INT TERM
+cat > "$PY" <<'PYEOF'
 import curses, errno, sys, time
 
 DEV = sys.argv[1]
@@ -153,3 +158,4 @@ def main(stdscr):
 
 curses.wrapper(main)
 PYEOF
+exec python3 "$PY" "$DEV"

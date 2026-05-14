@@ -47,6 +47,7 @@ CREATED_TRIG=1
 
 cleanup() {
     set +e
+    [ -n "${PY:-}" ] && rm -f "$PY"
     echo 0 | $SUDO tee "$DEV/buffer/enable" >/dev/null 2>&1
     echo '' | $SUDO tee "$DEV/trigger/current_trigger" >/dev/null 2>&1
     for f in "$DEV/scan_elements/"*_en; do
@@ -75,9 +76,11 @@ echo "$TRIG_NAME" | $SUDO tee "$DEV/trigger/current_trigger" >/dev/null
 echo 64 | $SUDO tee "$DEV/buffer/length" >/dev/null
 echo 1 | $SUDO tee "$DEV/buffer/enable" >/dev/null
 
-# Run (don't exec) so the trap above fires on python exit and tears
-# down the buffer / trigger.
-$SUDO python3 - "$DEV" "$TRIG_HZ" "$TRIG_PATH" <<'PYEOF'
+# Stash the Python in a temp file rather than piping it on stdin —
+# `python3 -` reads stdin as the script source, leaving curses with
+# no TTY to read keypresses from. cleanup() above handles `rm -f $PY`.
+PY=$(mktemp --suffix=.py)
+cat > "$PY" <<'PYEOF'
 import curses, errno, fcntl, os, struct, sys, time
 from collections import deque
 
@@ -247,3 +250,6 @@ def main(stdscr):
 
 curses.wrapper(main)
 PYEOF
+# Run (don't exec) so the trap above fires on python exit and tears
+# down the buffer / trigger.
+$SUDO python3 "$PY" "$DEV" "$TRIG_HZ" "$TRIG_PATH"
