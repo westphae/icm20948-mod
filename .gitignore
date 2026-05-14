@@ -8,4 +8,4 @@ Module.symvers
 modules.order
 *.dtbo
 .claude/
-
+__pycache__/
