@@ -106,6 +106,20 @@ def wr(path, value):
     with open(f"{DEV}/{path}", "w") as f:
         f.write(str(value))
 
+def wr_paused(path, value):
+    """
+    Write a config attribute that the driver protects with
+    iio_device_claim_direct (scale, DLPF) while the buffer is live.
+    The IIO core returns EBUSY on those writes, so briefly pause the
+    buffer for the write and resume. Samples drop for ~one trigger
+    period; in exchange the cycle keys work without exiting.
+    """
+    wr("buffer/enable", 0)
+    try:
+        wr(path, value)
+    finally:
+        wr("buffer/enable", 1)
+
 def cycle(current, options):
     if not options: return current
     try: i = options.index(current)
@@ -231,16 +245,16 @@ def main(stdscr):
                     return
                 elif k == 'a':
                     new = cycle(rd("in_accel_scale"), accel_scales)
-                    wr("in_accel_scale", new); status = f"accel scale → {new}"
+                    wr_paused("in_accel_scale", new); status = f"accel scale → {new}"
                 elif k == 'g':
                     new = cycle(rd("in_anglvel_scale"), gyro_scales)
-                    wr("in_anglvel_scale", new); status = f"gyro scale → {new}"
+                    wr_paused("in_anglvel_scale", new); status = f"gyro scale → {new}"
                 elif k == 'A':
                     new = cycle(a_lpf, accel_lpfs)
-                    wr("in_accel_filter_low_pass_3db_frequency", new); status = f"accel lpf → {new} Hz"
+                    wr_paused("in_accel_filter_low_pass_3db_frequency", new); status = f"accel lpf → {new} Hz"
                 elif k == 'G':
                     new = cycle(g_lpf, gyro_lpfs)
-                    wr("in_anglvel_filter_low_pass_3db_frequency", new); status = f"gyro lpf → {new} Hz"
+                    wr_paused("in_anglvel_filter_low_pass_3db_frequency", new); status = f"gyro lpf → {new} Hz"
                 elif k == 'o':
                     wr("in_magn_overrange", "0"); status = "overrange flag cleared"
             except OSError as e:
