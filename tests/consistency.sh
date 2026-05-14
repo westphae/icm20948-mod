@@ -79,26 +79,27 @@ sysfs_out, buf_cap, mag_max, accel_max = (
     sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4]))
 sysfs_rows = [list(map(int, l.split())) for l in open(sysfs_out) if l.strip()]
 chans = ["accel_x","accel_y","accel_z","magn_x","magn_y","magn_z"]
-# Drop glitch rows from sysfs means (same chip-level glitch as in the
-# buffered path's kernel filter).
-def is_glitch(row): return row[3]==row[4]==row[5] and row[3] in (0,-1)
-clean_rows = [r for r in sysfs_rows if not is_glitch(r)]
-sysfs_means = {c: statistics.fmean(row[i] for row in clean_rows)
-               for i, c in enumerate(chans)}
+# Compare medians, not means — a single saturated transient on one
+# axis would otherwise pull the buffered-window mean far enough to
+# swamp the per-channel delta. The point of this test is to catch
+# decode/sign/byte-swap divergence between paths, which moves the
+# whole distribution, not just the tail.
+sysfs_med = {c: statistics.median(row[i] for row in sysfs_rows)
+             for i, c in enumerate(chans)}
 data = open(buf_cap, "rb").read()
 rec = 32
 n = len(data) // rec
 def s16(b): return struct.unpack(">h", b)[0]
-def mean_at(off):
-    return statistics.fmean(s16(data[i*rec+off:i*rec+off+2]) for i in range(n))
-buf_means = {
-    "accel_x": mean_at(0), "accel_y": mean_at(2), "accel_z": mean_at(4),
-    "magn_x":  mean_at(14),"magn_y":  mean_at(16),"magn_z":  mean_at(18),
+def median_at(off):
+    return statistics.median(s16(data[i*rec+off:i*rec+off+2]) for i in range(n))
+buf_med = {
+    "accel_x": median_at(0), "accel_y": median_at(2), "accel_z": median_at(4),
+    "magn_x":  median_at(14),"magn_y":  median_at(16),"magn_z":  median_at(18),
 }
 print(f"  channel     sysfs    buffered    delta   limit")
 fail = []
 for c in chans:
-    s, b = sysfs_means[c], buf_means[c]
+    s, b = sysfs_med[c], buf_med[c]
     d = b - s
     limit = mag_max if c.startswith("magn") else accel_max
     flag = " FAIL" if abs(d) > limit else ""

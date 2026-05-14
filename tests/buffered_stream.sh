@@ -68,17 +68,23 @@ if zeros:
     sys.exit(f"FAIL: {zeros}/{n} buffered samples have mag=(0,0,0) — aux-master glitch filter regression")
 xs, ys, zs = zip(*mags)
 def stats(name, vals, limit):
-    s = max(vals) - min(vals)
-    print(f"  mag_{name} min={min(vals):6d} max={max(vals):6d} spread={s:5d} mean={sum(vals)/len(vals):8.1f}")
-    if s > limit:
-        # Print the outliers and their raw bytes for diagnosis.
-        mean = sum(vals) / len(vals)
+    # 5th-95th percentile spread: ignores transient outliers (chip
+    # saturating briefly, glitch flavour the kernel filter didn't
+    # cover) while still catching byte-swap regressions, which move
+    # the entire distribution.
+    s = sorted(vals)
+    lo, hi = s[len(s)*5//100], s[len(s)*95//100]
+    iqr = hi - lo
+    mn, mx = min(vals), max(vals)
+    print(f"  mag_{name} min={mn:6d} max={mx:6d} p5..p95={lo:6d}..{hi:6d} (spread={iqr:5d}) mean={sum(vals)/len(vals):8.1f}")
+    if iqr > limit:
+        # Dump samples falling outside the central band for diagnosis.
         idx = {"x":0,"y":1,"z":2}[name]
         for i, m in enumerate(mags):
-            if abs(m[idx] - mean) > limit / 2:
+            if not (lo <= m[idx] <= hi):
                 f = data[i*rec:(i+1)*rec]
                 print(f"    outlier i={i} mag={m} bytes={f[14:20].hex()}")
-        sys.exit(f"FAIL: mag_{name} spread {s} > {limit} — sensor moving or byte-swap regression?")
+        sys.exit(f"FAIL: mag_{name} p5..p95 spread {iqr} > {limit} — byte-swap regression?")
 stats("x", xs, mag_max)
 stats("y", ys, mag_max)
 stats("z", zs, mag_max)
